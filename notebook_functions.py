@@ -1,5 +1,9 @@
 import xarray as xr 
 import numpy as np
+import glob
+import yaml
+import rioxarray as rxr
+from datetime import datetime
 
 def rename_bands(in_xr, des_bands, position):
     """
@@ -7,6 +11,44 @@ def rename_bands(in_xr, des_bands, position):
     """
     in_xr.name = des_bands[position]
     return in_xr
+
+
+def prep_dataset(in_dir, measurement, product, dask_chunks, clip_coords = None):
+    """Prepare either the baseline or analysis dataset."""
+    scenes = glob.glob(f'{in_dir}/*/')
+
+    array_list = []
+
+    for scene in scenes:
+        yml = f'{scene}/datacube-metadata.yaml'
+        with open (yml) as stream: yml_meta = yaml.safe_load(stream)
+
+        # Load the bands provided in 'measurement' from the yaml file.
+        o_bands_data = [ rxr.open_rasterio(scene + yml_meta['image']['bands'][b]['path'], chunks=dask_chunks) for b in measurement ] 
+
+        # Clip the data to the bounding box if provided.
+        if clip_coords is not None:
+            o_bands_data = [ o_bands_data[i].rio.clip_box(minx = clip_coords['min_lon'], miny = clip_coords['min_lat'], 
+                                                          maxx = clip_coords['max_lon'], maxy = clip_coords['max_lat']) 
+                                                          for i in range(len(o_bands_data)) ]
+
+        # Get the timestamp from the yaml file.
+        timestamp = datetime.strptime(yml_meta['extent']['center_dt'], '%Y-%m-%d %H:%M:%S')
+
+        # Stack the bands together into a single xarray dataset.
+        band_data = stack_bands(o_bands_data, measurement, timestamp)
+
+        # Append each stacked scene to a list to be combined later.
+        array_list.append(band_data)
+
+    # Stack the scenes together into xarray dataset.
+    ds = stack_scenes(array_list)
+
+    # Mask out nodata values.
+    ds = ds.where(ds != -9999)
+    print(f'Final Dataset: {ds}')
+
+    return ds
 
 def stack_arrays(array_list, ref_band, time_handling, timestamp=None):
     """Given a list of arrays, stack them to prepare for merging into single dataset 
